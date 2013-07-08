@@ -1,0 +1,287 @@
+<!-- <input type="file" onchange="openPDF(this)" webkitdirectory> -->
+<script src="text_layer.js"></script>
+<script src="ui_utils.js"></script>
+<script src="compatibility.js"></script>
+<script src="pdf.js"></script>
+<textarea style="width: 500px; position:absolute; right: 0; height: 100%; top: 0; z-index: 42" id="output"></textarea>
+<link rel="stylesheet" href="pdf.css">
+<script>
+function openPDF(e){
+	console.log(e.files)
+}
+
+
+function cancel(e) {
+  if (e.preventDefault) { e.preventDefault(); }
+  return false;
+}
+
+var PDFQueue = [];
+
+window.addEventListener('dragover', cancel, false)
+window.addEventListener('dragenter', cancel, false);
+window.addEventListener('drop', function(e){
+	var files = e.dataTransfer.files;
+	for(var i = 0; i < files.length; i++){
+		PDFQueue.push(files[i]);
+	}
+	if(queueActive == false){
+		processFromQueue();
+	}
+	e.preventDefault();
+	return false;
+})
+
+var queueActive = false;
+function processFromQueue(){
+	if(PDFQueue.length == 0){
+		queueActive = false;
+		return;
+	}
+	queueActive = true;
+	var fr = new FileReader();
+	var file = PDFQueue.shift();
+	fr.onload = function(){
+		var bytes = new Uint8Array(fr.result)
+		console.log(file, fr);
+		var p = document.getElementsByClassName('page');
+		while(p.length > 0){
+			p[0].parentNode.removeChild(p[0]);
+		}
+		processDocument(bytes, file.name, function(){
+			processFromQueue()
+		})
+	}
+	fr.readAsArrayBuffer(file)
+}
+
+/* 
+ * To Title Case 2.0.1 – http://individed.com/code/to-title-case/
+ * Copyright © 2008–2012 David Gouch. Licensed under the MIT License. 
+ */
+
+String.prototype.toTitleCase = function () {
+  var smallWords = /^(a|an|and|as|at|but|by|en|for|if|in|of|on|or|the|to|vs?\.?|via)$/i;
+
+  return this.replace(/([^\W_]+[^\s-]*) */g, function (match, p1, index, title) {
+    if (index > 0 && index + p1.length !== title.length &&
+      p1.search(smallWords) > -1 && title.charAt(index - 2) !== ":" && 
+      title.charAt(index - 1).search(/[^\s-]/) < 0) {
+      return match.toLowerCase();
+    }
+
+    if (p1.substr(1).search(/[A-Z]|\../) > -1) {
+      return match;
+    }
+
+    return match.charAt(0).toUpperCase() + match.substr(1);
+  });
+};
+
+PDFJS.disableWorker = true;
+function processDocument(bytes, filename, cb){
+	PDFJS.getDocument(bytes).then(function(pdf){
+		var num = 0;
+		var pages = [];
+		function nextPage(){
+			num++;
+			if(num > pdf.numPages){
+				console.log(pages);
+				var questions = [];
+				pages.forEach(function(page){
+					var mode = null;
+					var buffer = [];
+
+					page.forEach(function(line){
+						var trim = line.trim();
+
+						if(line.replace(/ /g, '') == 'TOSS-UP'){
+							mode = 1;
+							questions.push(buffer);
+							buffer = [];
+						}else if(trim == 'BONUS'){
+							mode = 2;
+							questions.push(buffer);
+							buffer = [];
+						}else{
+							buffer.push(trim)
+						}
+
+					})
+					questions.push(buffer);
+				})
+				questions = questions.filter(function(e){return e.length > 0})
+				
+				var processed = questions.map(function(e){
+					var parts = e.join('\n').split('ANSWER:');
+					if(parts.length != 2){
+						console.error('could not find answer block', e);
+						return null;
+					}
+					var answer = parts[1].trim();
+					var body = parts[0].trim();
+					var match = body.match(/^(\d+)\s?\)\s+([A-Z ]+)\s+(Short Answer|Multiple Choice)/);
+					if(!match){
+						console.error('could not match pattern', e)
+						return null;
+					}
+					var type = 'scibowl';
+					if(match[3] == 'Multiple Choice'){
+						type = 'scibowl-multi';
+					}
+					var question = body.slice(match[0].length).trim().replace(/\n([^A-Z][^\)])/g, '$1').replace(/ +/g, ' ')
+					return {
+						type: type,
+						num: parseInt(match[1]),
+						round: filename,
+						tournament: "Web Sample",
+						difficulty: "MS",
+						category: match[2].toLowerCase().toTitleCase().trim(),
+						question: question,
+						answer: answer.toLowerCase().toTitleCase().trim()
+					}
+				}).filter(function(e){return e});
+				document.getElementById('output').value += processed.map(function(e){
+					return JSON.stringify(e)
+				}).join('\n') + '\n'
+				cb();
+				return;
+			}
+			pdf.getPage(num).then(function(page){
+				var scale = 1.0;
+		        var viewport = page.getViewport(scale);
+
+		        //
+		        // Prepare canvas using PDF page dimensions
+		        //
+		        var container = document.createElement('div');
+		        container.className = 'page'
+		        var canvas = document.createElement('canvas');
+		        var context = canvas.getContext('2d');
+		        canvas.height = viewport.height;
+		        canvas.width = viewport.width;
+		        canvas.className = 'canvasWrapper';
+		        // var backup = context.fillText;
+		        // context.fillText = function(){
+		        // 	console.log(arguments)
+		        // 	console.log(context._transformMatrix)
+		        // }
+		        var text = document.createElement('div');
+		        text.className = 'textLayer'
+		        text.style.width = canvas.width + 'px';
+		        text.style.height = canvas.height + 'px';
+
+		        container.appendChild(canvas)
+		        container.appendChild(text);
+		        document.body.appendChild(container)
+
+		        //
+		        // Render PDF page into canvas context
+		        //
+		        var layer = new TextLayerBuilder({
+		        	textLayerDiv: text,
+		        	pageIndex: page.pageNumber - 1
+		        })
+		        // console.log(layer);
+		        page.render({
+		    		canvasContext: context, 
+		    		viewport: viewport,
+		    		textLayer: layer,
+		    		lastScrollSource: pdf
+		    	}).then(function(){
+
+
+					var double_line_height = 20;
+					var line_height = 5;
+					var space_width = 2;
+					var useful_width = 20;
+		    		var valid_y = layer.textDivs.filter(function(e){
+		    			return e.offsetWidth >= useful_width
+		    		}).map(function(e){
+		    			return parseInt(e.style.top)
+		    		})
+
+		    		function nearest_valid(val){
+		    			var min = Infinity;
+		    			var best = null;
+		    			valid_y.forEach(function(e){
+		    				if(min > Math.pow(e - val, 2)){
+		    					min = Math.pow(e - val, 2);
+		    					best = e;
+		    				}
+		    			});
+		    			return best;
+		    		}
+		    		function index(div){
+		    			var y = parseInt(div.style.top);
+		    			// console.log(div.offsetWidth);
+		    			if(div.offsetWidth < useful_width){
+		    				// console.log(div.innerText)
+		    				// console.log('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
+		    				y = nearest_valid(y);
+		    			}
+		    			return y * 10000 + parseInt(div.style.left)
+		    			
+		    		}
+		    		var sorted = layer.textDivs.sort(function(a, b){
+						return index(a) - index(b)
+					})
+
+
+					var lastLine = 0;
+					var lastX = 0;
+					var lines = [];
+					var buffer = [];
+					sorted.forEach(function(div){
+						var line = parseInt(div.style.top);
+						var text = div.innerText;
+						var x = parseFloat(div.style.left)
+						var trim = text.trim();
+						if(trim == ''){
+							
+						}else{
+							// console.log(line - lastLine)
+							if(line - lastLine > double_line_height){
+								lines.push(buffer);
+								buffer = [];
+							}else if(line - lastLine > line_height){
+								buffer.push('\n')
+							}else if(x - lastX > space_width){
+								buffer.push(' ');
+							}
+							lastLine = line;
+							
+						}
+						if(parseFloat(div.style.fontSize) < 10 && (trim != '–' && trim != '+')){
+							text = '^' + text;
+						}
+						buffer.push(text);
+						lastX = x + div.offsetWidth;;
+					})
+					lines.push(buffer);
+
+					var stuff = lines.map(function(e){return e.join('')});
+					if(/page/i.test(stuff[stuff.length - 1])){
+						stuff.pop();
+					}
+					if(stuff[0].trim() == ''){
+						stuff.shift();
+					}
+					if(/round/i.test(stuff[0])){
+						stuff.shift()
+					}
+					pages.push(stuff)
+		    		nextPage();
+		    	})
+		    		
+		    	page.getTextContent().then(function(textContent){
+		    		layer.setTextContent(textContent)
+		    	})	
+		
+			})
+		
+		}
+		nextPage();
+	})
+}
+</script>
